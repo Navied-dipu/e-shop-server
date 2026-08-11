@@ -1,5 +1,11 @@
+import { Prisma } from "../../generated/prisma/client.js";
 import { prisma } from "../../lib/prisma.js";
 import { AppError } from "../../lib/AppError.js";
+import { assertActive, softDelete, runUnique } from "../../lib/db.js";
+import {
+  buildPagination,
+  toPaginatedResult,
+} from "../../lib/pagination.js";
 import type {
   CreateCategoryInput,
   UpdateCategoryInput,
@@ -15,50 +21,37 @@ const CATEGORY_SELECT = {
   updatedAt: true,
 } as const;
 
-export interface PaginatedCategories {
-  categories: unknown[];
-  page: number;
-  limit: number;
-  total: number;
-  totalPages: number;
+async function assertParent(parentId: string | null | undefined): Promise<void> {
+  if (!parentId) return;
+  const parent = await prisma.category.findFirst({
+    where: { id: parentId, isDeleted: false },
+    select: { id: true },
+  });
+  if (!parent) {
+    throw new AppError("Parent category not found", 400);
+  }
 }
 
 export async function createCategory(input: CreateCategoryInput) {
-  if (input.parentId) {
-    const parent = await prisma.category.findFirst({
-      where: { id: input.parentId, isDeleted: false },
-      select: { id: true },
-    });
-    if (!parent) {
-      throw new AppError("Parent category not found", 400);
-    }
-  }
+  await assertParent(input.parentId ?? null);
 
-  const data: { name: string; slug: string; parentId?: string | null } = {
+  const data: Prisma.CategoryCreateInput = {
     name: input.name,
-    slug: input.slug,
+    slug: input.slug ?? slugify(input.name),
   };
-  if (input.parentId !== undefined) {
-    data.parentId = input.parentId;
+  if (input.parentId !== undefined && input.parentId !== null) {
+    data.parent = { connect: { id: input.parentId } };
   }
 
-  try {
-    return await prisma.category.create({
-      data,
-      select: CATEGORY_SELECT,
-    });
-  } catch (err) {
-    if ((err as { code?: string }).code === "P2002") {
-      throw new AppError("Category slug already exists", 409);
-    }
-    throw err;
-  }
+  return runUnique(
+    () => prisma.category.create({ data, select: CATEGORY_SELECT }),
+    "Category slug already exists",
+  );
 }
 
-export async function getCategories(
-  filters: ListCategoryFilters,
-): Promise<PaginatedCategories> {
-  const where: Record<string, unknown> = { isDeleted: false };
+export async function getCategories(filters: ListCategoryFilters) {
+  const { page, limit, skip } = buildPagination(filters.page, filters.limit);
+  const where: Prisma.CategoryWhereInput = { isDeleted: false };
 
   if (filters.search) {
     where.OR = [
@@ -66,33 +59,22 @@ export async function getCategories(
       { slug: { contains: filters.search, mode: "insensitive" } },
     ];
   }
-
   if (filters.parentId !== undefined) {
     where.parentId = filters.parentId;
   }
-
-  const safePage = Math.max(1, Math.floor(filters.page));
-  const safeLimit = Math.min(100, Math.max(1, Math.floor(filters.limit)));
-  const skip = (safePage - 1) * safeLimit;
 
   const [categories, total] = await Promise.all([
     prisma.category.findMany({
       where,
       select: CATEGORY_SELECT,
       skip,
-      take: safeLimit,
+      take: limit,
       orderBy: { createdAt: "desc" },
     }),
     prisma.category.count({ where }),
   ]);
 
-  return {
-    categories,
-    page: safePage,
-    limit: safeLimit,
-    total,
-    totalPages: Math.ceil(total / safeLimit),
-  };
+  return toPaginatedResult(categories, total, page, limit);
 }
 
 export async function getCategoryById(id: string) {
@@ -100,84 +82,54 @@ export async function getCategoryById(id: string) {
     where: { id, isDeleted: false },
     select: CATEGORY_SELECT,
   });
-
   if (!category) {
     throw new AppError("Category not found", 404);
   }
-
   return category;
 }
 
 export async function updateCategory(id: string, input: UpdateCategoryInput) {
-  const existing = await prisma.category.findFirst({
-    where: { id, isDeleted: false },
-    select: { id: true },
-  });
-
-  if (!existing) {
-    throw new AppError("Category not found", 404);
-  }
+  await assertActive("category", id, "Category");
 
   if (input.parentId && input.parentId === id) {
     throw new AppError("Category cannot be its own parent", 400);
   }
+  await assertParent(input.parentId ?? null);
 
-  if (input.parentId) {
-    const parent = await prisma.category.findFirst({
-      where: { id: input.parentId, isDeleted: false },
-      select: { id: true },
-    });
-    if (!parent) {
-      throw new AppError("Parent category not found", 400);
-    }
-  }
-
-  const data: {
-    name?: string;
-    slug?: string;
-    parentId?: string | null;
-  } = {};
+  const data: Prisma.CategoryUpdateInput = {};
   if (input.name !== undefined) data.name = input.name;
   if (input.slug !== undefined) data.slug = input.slug;
-  if (input.parentId !== undefined) data.parentId = input.parentId;
-
-  try {
-    return await prisma.category.update({
-      where: { id },
-      data,
-      select: CATEGORY_SELECT,
-    });
-  } catch (err) {
-    if ((err as { code?: string }).code === "P2002") {
-      throw new AppError("Category slug already exists", 409);
-    }
-    throw err;
+  if (input.parentId !== undefined) {
+    data.parent =
+      input.parentId === null ? { disconnect: true } : { connect: { id: input.parentId } };
   }
+
+  return runUnique(
+    () =>
+      prisma.category.update({ where: { id }, data, select: CATEGORY_SELECT }),
+    "Category slug already exists",
+  );
 }
 
 export async function deleteCategory(id: string) {
-  const existing = await prisma.category.findFirst({
-    where: { id, isDeleted: false },
-    select: { id: true },
-  });
-
-  if (!existing) {
-    throw new AppError("Category not found", 404);
-  }
+  await assertActive("category", id, "Category");
 
   const hasChildren = await prisma.category.count({
     where: { parentId: id, isDeleted: false },
   });
   if (hasChildren > 0) {
-    throw new AppError(
-      "Cannot delete category with child categories",
-      409,
-    );
+    throw new AppError("Cannot delete category with child categories", 409);
   }
 
-  return prisma.category.update({
-    where: { id },
-    data: { isDeleted: true },
-    select: CATEGORY_SELECT,
-  });
+  await softDelete("category", id, "Category");
+  return getCategoryById(id);
+}
+
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-");
 }

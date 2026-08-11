@@ -1,6 +1,11 @@
 import { Prisma } from "../../generated/prisma/client.js";
 import { prisma } from "../../lib/prisma.js";
 import { AppError } from "../../lib/AppError.js";
+import { assertActive, softDelete } from "../../lib/db.js";
+import {
+  buildPagination,
+  toPaginatedResult,
+} from "../../lib/pagination.js";
 import type {
   CreateOrderInput,
   UpdateOrderStatusInput,
@@ -15,27 +20,11 @@ const ORDER_SELECT = {
   createdAt: true,
   updatedAt: true,
   items: {
-    select: {
-      id: true,
-      quantity: true,
-      unitPrice: true,
-      productId: true,
-    },
+    select: { id: true, quantity: true, unitPrice: true, productId: true },
   },
 } as const;
 
-export interface PaginatedOrders {
-  orders: unknown[];
-  page: number;
-  limit: number;
-  total: number;
-  totalPages: number;
-}
-
-export async function createOrder(
-  input: CreateOrderInput,
-  userId: string,
-) {
+export async function createOrder(input: CreateOrderInput, userId: string) {
   const productIds = input.items.map((i) => i.productId);
   const products = await prisma.product.findMany({
     where: { id: { in: productIds }, isDeleted: false },
@@ -58,7 +47,7 @@ export async function createOrder(
   );
 
   return prisma.$transaction(async (tx) => {
-    const order = await tx.order.create({
+    return tx.order.create({
       data: {
         userId,
         total,
@@ -72,7 +61,6 @@ export async function createOrder(
       },
       select: ORDER_SELECT,
     });
-    return order;
   });
 }
 
@@ -80,38 +68,31 @@ export async function getOrders(
   filters: ListOrderQuery,
   userId: string,
   isAdmin: boolean,
-): Promise<PaginatedOrders> {
+) {
+  const { page, limit, skip } = buildPagination(filters.page, filters.limit);
   const where: Prisma.OrderWhereInput = { isDeleted: false };
-  if (!isAdmin) {
-    where.userId = userId;
-  }
-  if (filters.status) {
-    where.status = filters.status;
-  }
-
-  const skip = (filters.page - 1) * filters.limit;
+  if (!isAdmin) where.userId = userId;
+  if (filters.status) where.status = filters.status;
 
   const [orders, total] = await Promise.all([
     prisma.order.findMany({
       where,
       select: ORDER_SELECT,
       skip,
-      take: filters.limit,
+      take: limit,
       orderBy: { [filters.sortBy]: filters.order },
     }),
     prisma.order.count({ where }),
   ]);
 
-  return {
-    orders,
-    page: filters.page,
-    limit: filters.limit,
-    total,
-    totalPages: Math.ceil(total / filters.limit),
-  };
+  return toPaginatedResult(orders, total, page, limit);
 }
 
-export async function getOrderById(id: string, userId: string, isAdmin: boolean) {
+export async function getOrderById(
+  id: string,
+  userId: string,
+  isAdmin: boolean,
+) {
   const order = await prisma.order.findFirst({
     where: { id, isDeleted: false },
     select: ORDER_SELECT,
@@ -129,14 +110,7 @@ export async function updateOrderStatus(
   id: string,
   input: UpdateOrderStatusInput,
 ) {
-  const existing = await prisma.order.findFirst({
-    where: { id, isDeleted: false },
-    select: { id: true },
-  });
-  if (!existing) {
-    throw new AppError("Order not found", 404);
-  }
-
+  await assertActive("order", id, "Order");
   return prisma.order.update({
     where: { id },
     data: { status: input.status },

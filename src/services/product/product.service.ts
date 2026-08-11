@@ -1,6 +1,11 @@
 import { Prisma } from "../../generated/prisma/client.js";
 import { prisma } from "../../lib/prisma.js";
 import { AppError } from "../../lib/AppError.js";
+import { assertActive, softDelete, runUnique } from "../../lib/db.js";
+import {
+  buildPagination,
+  toPaginatedResult,
+} from "../../lib/pagination.js";
 import type {
   CreateProductInput,
   UpdateProductInput,
@@ -29,36 +34,31 @@ const PRODUCT_SELECT = {
   updatedAt: true,
 } as const;
 
-export interface PaginatedProducts {
-  products: unknown[];
-  page: number;
-  limit: number;
-  total: number;
-  totalPages: number;
+async function assertCategories(categoryIds: string[]): Promise<void> {
+  const categories = await prisma.category.findMany({
+    where: { id: { in: categoryIds }, isDeleted: false },
+    select: { id: true },
+  });
+  if (categories.length !== categoryIds.length) {
+    throw new AppError("One or more categories not found", 400);
+  }
 }
 
 export async function createProduct(
   input: CreateProductInput,
   sellerId: string,
 ) {
+  await assertCategories(input.categoryIds);
+
   const slug = input.slug ?? slugify(input.name);
-
-  const categories = await prisma.category.findMany({
-    where: { id: { in: input.categoryIds }, isDeleted: false },
-    select: { id: true },
-  });
-  if (categories.length !== input.categoryIds.length) {
-    throw new AppError("One or more categories not found", 400);
-  }
-
   const data: Prisma.ProductCreateInput = {
     name: input.name,
     slug,
     price: new Prisma.Decimal(input.price),
     stock: input.stock,
-        status: input.status,
-        seller: { connect: { id: sellerId } },
-        categories: {
+    status: input.status,
+    seller: { connect: { id: sellerId } },
+    categories: {
       create: input.categoryIds.map((categoryId) => ({
         category: { connect: { id: categoryId } },
       })),
@@ -68,22 +68,14 @@ export async function createProduct(
     data.description = input.description;
   }
 
-  try {
-    return await prisma.product.create({
-      data,
-      select: PRODUCT_SELECT,
-    });
-  } catch (err) {
-    if ((err as { code?: string }).code === "P2002") {
-      throw new AppError("Product slug already exists", 409);
-    }
-    throw err;
-  }
+  return runUnique(
+    () => prisma.product.create({ data, select: PRODUCT_SELECT }),
+    "Product slug already exists",
+  );
 }
 
-export async function getProducts(
-  filters: ListProductQuery,
-): Promise<PaginatedProducts> {
+export async function getProducts(filters: ListProductQuery) {
+  const { page, limit, skip } = buildPagination(filters.page, filters.limit);
   const where: Prisma.ProductWhereInput = { isDeleted: false };
 
   if (filters.search) {
@@ -92,38 +84,26 @@ export async function getProducts(
       { slug: { contains: filters.search, mode: "insensitive" } },
     ];
   }
-  if (filters.status) {
-    where.status = filters.status;
-  }
-  if (filters.sellerId) {
-    where.sellerId = filters.sellerId;
-  }
+  if (filters.status) where.status = filters.status;
+  if (filters.sellerId) where.sellerId = filters.sellerId;
   if (filters.categoryId) {
     where.categories = {
       some: { categoryId: filters.categoryId, isDeleted: false },
     };
   }
 
-  const skip = (filters.page - 1) * filters.limit;
-
   const [products, total] = await Promise.all([
     prisma.product.findMany({
       where,
       select: PRODUCT_SELECT,
       skip,
-      take: filters.limit,
+      take: limit,
       orderBy: { [filters.sortBy]: filters.order },
     }),
     prisma.product.count({ where }),
   ]);
 
-  return {
-    products,
-    page: filters.page,
-    limit: filters.limit,
-    total,
-    totalPages: Math.ceil(total / filters.limit),
-  };
+  return toPaginatedResult(products, total, page, limit);
 }
 
 export async function getProductById(id: string) {
@@ -133,11 +113,7 @@ export async function getProductById(id: string) {
       ...PRODUCT_SELECT,
       categories: {
         where: { isDeleted: false },
-        select: {
-          category: {
-            select: { id: true, name: true, slug: true },
-          },
-        },
+        select: { category: { select: { id: true, name: true, slug: true } } },
       },
       reviews: {
         where: { isDeleted: false },
@@ -151,22 +127,14 @@ export async function getProductById(id: string) {
       },
     },
   });
-
   if (!product) {
     throw new AppError("Product not found", 404);
   }
-
   return product;
 }
 
 export async function updateProduct(id: string, input: UpdateProductInput) {
-  const existing = await prisma.product.findFirst({
-    where: { id, isDeleted: false },
-    select: { id: true },
-  });
-  if (!existing) {
-    throw new AppError("Product not found", 404);
-  }
+  await assertActive("product", id, "Product");
 
   const data: Prisma.ProductUpdateInput = {};
   if (input.name !== undefined) data.name = input.name;
@@ -177,47 +145,24 @@ export async function updateProduct(id: string, input: UpdateProductInput) {
   if (input.status !== undefined) data.status = input.status;
 
   if (input.categoryIds !== undefined) {
-    const categories = await prisma.category.findMany({
-      where: { id: { in: input.categoryIds }, isDeleted: false },
-      select: { id: true },
-    });
-    if (categories.length !== input.categoryIds.length) {
-      throw new AppError("One or more categories not found", 400);
-    }
+    await assertCategories(input.categoryIds);
     data.categories = {
-      deleteMany: {}, // remove old links
+      deleteMany: {},
       create: input.categoryIds.map((categoryId) => ({
         category: { connect: { id: categoryId } },
       })),
     };
   }
 
-  try {
-    return await prisma.product.update({
-      where: { id },
-      data,
-      select: PRODUCT_SELECT,
-    });
-  } catch (err) {
-    if ((err as { code?: string }).code === "P2002") {
-      throw new AppError("Product slug already exists", 409);
-    }
-    throw err;
-  }
+  return runUnique(
+    () =>
+      prisma.product.update({ where: { id }, data, select: PRODUCT_SELECT }),
+    "Product slug already exists",
+  );
 }
 
 export async function deleteProduct(id: string) {
-  const existing = await prisma.product.findFirst({
-    where: { id, isDeleted: false },
-    select: { id: true },
-  });
-  if (!existing) {
-    throw new AppError("Product not found", 404);
-  }
-
-  return prisma.product.update({
-    where: { id },
-    data: { isDeleted: true },
-    select: PRODUCT_SELECT,
-  });
+  await assertActive("product", id, "Product");
+  await softDelete("product", id, "Product");
+  return getProductById(id);
 }

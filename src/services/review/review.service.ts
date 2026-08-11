@@ -1,6 +1,11 @@
 import { Prisma } from "../../generated/prisma/client.js";
 import { prisma } from "../../lib/prisma.js";
 import { AppError } from "../../lib/AppError.js";
+import { assertActive, runUnique } from "../../lib/db.js";
+import {
+  buildPagination,
+  toPaginatedResult,
+} from "../../lib/pagination.js";
 import type {
   CreateReviewInput,
   UpdateReviewInput,
@@ -16,14 +21,6 @@ const REVIEW_SELECT = {
   createdAt: true,
   updatedAt: true,
 } as const;
-
-export interface PaginatedReviews {
-  reviews: unknown[];
-  page: number;
-  limit: number;
-  total: number;
-  totalPages: number;
-}
 
 export async function createReview(
   input: CreateReviewInput,
@@ -51,27 +48,18 @@ export async function createReview(
     product: { connect: { id: productId } },
     user: { connect: { id: userId } },
   };
-  if (input.comment !== undefined) {
-    data.comment = input.comment;
-  }
+  if (input.comment !== undefined) data.comment = input.comment;
 
-  try {
-    return await prisma.review.create({
-      data,
-      select: REVIEW_SELECT,
-    });
-  } catch (err) {
-    if ((err as { code?: string }).code === "P2002") {
-      throw new AppError("You have already reviewed this product", 409);
-    }
-    throw err;
-  }
+  return runUnique(
+    () => prisma.review.create({ data, select: REVIEW_SELECT }),
+    "You have already reviewed this product",
+  );
 }
 
 export async function getReviewsByProduct(
   productId: string,
   filters: ListReviewQuery,
-): Promise<PaginatedReviews> {
+) {
   const product = await prisma.product.findFirst({
     where: { id: productId, isDeleted: false },
     select: { id: true },
@@ -80,30 +68,21 @@ export async function getReviewsByProduct(
     throw new AppError("Product not found", 404);
   }
 
-  const where: Prisma.ReviewWhereInput = {
-    productId,
-    isDeleted: false,
-  };
-  const skip = (filters.page - 1) * filters.limit;
+  const { page, limit, skip } = buildPagination(filters.page, filters.limit);
+  const where: Prisma.ReviewWhereInput = { productId, isDeleted: false };
 
   const [reviews, total] = await Promise.all([
     prisma.review.findMany({
       where,
       select: REVIEW_SELECT,
       skip,
-      take: filters.limit,
+      take: limit,
       orderBy: { [filters.sortBy]: filters.order },
     }),
     prisma.review.count({ where }),
   ]);
 
-  return {
-    reviews,
-    page: filters.page,
-    limit: filters.limit,
-    total,
-    totalPages: Math.ceil(total / filters.limit),
-  };
+  return toPaginatedResult(reviews, total, page, limit);
 }
 
 export async function getReviewById(id: string) {
@@ -117,10 +96,9 @@ export async function getReviewById(id: string) {
   return review;
 }
 
-async function getOwnedReview(id: string): Promise<{
-  id: string;
-  userId: string;
-}> {
+async function getOwnedReview(
+  id: string,
+): Promise<{ id: string; userId: string }> {
   const review = await prisma.review.findFirst({
     where: { id, isDeleted: false },
     select: { id: true, userId: true },

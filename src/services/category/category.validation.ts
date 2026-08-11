@@ -1,23 +1,6 @@
-import { AppError } from "../../lib/AppError.js";
+import { z } from "zod";
 
-export interface CreateCategoryInput {
-  name: string;
-  slug: string;
-  parentId: string | null;
-}
-
-export interface UpdateCategoryInput {
-  name?: string;
-  slug?: string;
-  parentId?: string | null;
-}
-
-export interface ListCategoryFilters {
-  search: string | undefined;
-  parentId: string | null | undefined;
-  page: number;
-  limit: number;
-}
+import { validateId } from "../../lib/validate.js";
 
 function slugify(value: string): string {
   return value
@@ -28,86 +11,37 @@ function slugify(value: string): string {
     .replace(/-+/g, "-");
 }
 
-function assertString(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new AppError(`${field} must be a non-empty string`, 400);
-  }
-  return value.trim();
-}
+export const createCategorySchema = z.object({
+  name: z.string().min(1, "name is required").max(255),
+  slug: z
+    .string()
+    .min(1)
+    .max(255)
+    .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "slug must be kebab-case")
+    .optional(),
+  parentId: z.string().min(1).nullable().optional(),
+});
 
-export function validateCreateCategory(body: unknown): CreateCategoryInput {
-  if (typeof body !== "object" || body === null) {
-    throw new AppError("Invalid request body", 400);
-  }
-  const data = body as Record<string, unknown>;
+export const updateCategorySchema = z.object({
+  name: z.string().min(1).max(255).optional(),
+  slug: z
+    .string()
+    .min(1)
+    .max(255)
+    .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "slug must be kebab-case")
+    .optional(),
+  parentId: z.string().min(1).nullable().optional(),
+});
 
-  const name = assertString(data.name, "name");
-  let slug: string | undefined;
-  if (data.slug !== undefined) {
-    slug = assertString(data.slug, "slug");
-  }
-  const parentId =
-    data.parentId === undefined || data.parentId === null
-      ? null
-      : assertString(data.parentId, "parentId");
+export const listCategoryQuerySchema = z.object({
+  search: z.string().max(255).optional(),
+  parentId: z.string().min(1).nullable().optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(10),
+});
 
-  return {
-    name,
-    slug: slug ?? slugify(name),
-    parentId,
-  };
-}
+export type CreateCategoryInput = z.infer<typeof createCategorySchema>;
+export type UpdateCategoryInput = z.infer<typeof updateCategorySchema>;
+export type ListCategoryFilters = z.infer<typeof listCategoryQuerySchema>;
 
-export function validateUpdateCategory(body: unknown): UpdateCategoryInput {
-  if (typeof body !== "object" || body === null) {
-    throw new AppError("Invalid request body", 400);
-  }
-  const data = body as Record<string, unknown>;
-  const result: UpdateCategoryInput = {};
-
-  if (data.name !== undefined) {
-    result.name = assertString(data.name, "name");
-  }
-  if (data.slug !== undefined) {
-    result.slug = assertString(data.slug, "slug");
-  }
-  if (data.parentId !== undefined) {
-    result.parentId =
-      data.parentId === null ? null : assertString(data.parentId, "parentId");
-  }
-
-  if (Object.keys(result).length === 0) {
-    throw new AppError("No valid fields provided for update", 400);
-  }
-
-  return result;
-}
-
-export function validateListCategories(query: unknown): ListCategoryFilters {
-  const q = (query ?? {}) as Record<string, unknown>;
-  const page = Math.max(1, Math.floor(Number(q.page) || 1));
-  const limit = Math.min(100, Math.max(1, Math.floor(Number(q.limit) || 10)));
-
-  let parentId: string | null | undefined;
-  if (q.parentId !== undefined) {
-    if (q.parentId === "null" || q.parentId === null) {
-      parentId = null;
-    } else if (typeof q.parentId === "string" && q.parentId.trim().length > 0) {
-      parentId = q.parentId.trim();
-    }
-  }
-
-  const search =
-    typeof q.search === "string" && q.search.trim().length > 0
-      ? q.search.trim()
-      : undefined;
-
-  return { search, parentId, page, limit };
-}
-
-export function validateId(id: unknown): string {
-  if (typeof id !== "string" || id.trim().length === 0) {
-    throw new AppError("Invalid id parameter", 400);
-  }
-  return id.trim();
-}
+export { slugify, validateId };
