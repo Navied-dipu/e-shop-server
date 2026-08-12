@@ -1,0 +1,420 @@
+@baseUrl = http://localhost:5000/api
+
+### ============================================================
+### AUTH — Registration / Login / Token usage
+### ============================================================
+
+### Register an ADMIN (needed for admin-only endpoints)
+# 201 -> { user, token }
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "admin@example.com",
+  "password": "secret123",
+  "name": "Admin User",
+  "role": "ADMIN"
+}
+
+### Register a normal USER
+# 201 -> { user, token }
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "user@example.com",
+  "password": "secret123",
+  "name": "Normal User"
+}
+
+### Login (use this token as ADMIN_TOKEN / USER_TOKEN)
+# 200 -> { user, token }
+# @name login
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "admin@example.com",
+  "password": "secret123"
+}
+
+### Login as normal user
+# @name loginUser
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "user@example.com",
+  "password": "secret123"
+}
+
+### Login with wrong password (error case: 401)
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "admin@example.com",
+  "password": "wrongpass"
+}
+
+### Invalid login body (error case: 400 zod)
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "not-an-email",
+  "password": ""
+}
+
+### ============================================================
+### CATEGORY — full CRUD + soft delete (ADMIN only for writes)
+### ============================================================
+
+### List categories (public)
+GET {{baseUrl}}/categories?page=1&limit=10&search=
+
+### Create category (ADMIN) -> capture id as CAT_ID
+# 201
+# @name createCategory
+POST {{baseUrl}}/categories
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.token}}
+
+{
+  "name": "Electronics",
+  "slug": "electronics"
+}
+
+### Create nested category under the one above
+# 201
+POST {{baseUrl}}/categories
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.token}}
+
+{
+  "name": "Phones",
+  "slug": "phones",
+  "parentId": "{{createCategory.response.body.data.id}}"
+}
+
+### Create category with invalid slug (error case: 400 zod)
+POST {{baseUrl}}/categories
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.token}}
+
+{
+  "name": "Bad Slug",
+  "slug": "Not Kebab Case!"
+}
+
+### Create category without auth (error case: 401)
+POST {{baseUrl}}/categories
+Content-Type: application/json
+
+{
+  "name": "No Auth"
+}
+
+### Get category by id
+GET {{baseUrl}}/categories/{{createCategory.response.body.data.id}}
+
+### Get non-existent category (error case: 404)
+GET {{baseUrl}}/categories/cli3non existentid00000000
+
+### Update category (ADMIN)
+# 200
+PATCH {{baseUrl}}/categories/{{createCategory.response.body.data.id}}
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.token}}
+
+{
+  "name": "Consumer Electronics"
+}
+
+### Soft delete category (ADMIN)
+# 200 -> isDeleted true
+DELETE {{baseUrl}}/categories/{{createCategory.response.body.data.id}}
+Authorization: Bearer {{login.response.body.token}}
+
+### Get soft-deleted category (error case: 404, excluded)
+GET {{baseUrl}}/categories/{{createCategory.response.body.data.id}}
+
+### ============================================================
+### PRODUCT — full CRUD + soft delete (auth required)
+### ============================================================
+
+### List products (public)
+GET {{baseUrl}}/products?page=1&limit=10&status=PUBLISHED&sortBy=createdAt&order=desc
+
+### Create product (auth) -> capture id as PROD_ID
+# 201
+# @name createProduct
+POST {{baseUrl}}/products
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.token}}
+
+{
+  "name": "Smartphone X",
+  "slug": "smartphone-x",
+  "description": "A flagship phone",
+  "price": 699.99,
+  "stock": 50,
+  "status": "PUBLISHED",
+  "categoryIds": ["{{createCategory.response.body.data.id}}"]
+}
+
+### Create product with duplicate slug (error case: 409 after first)
+POST {{baseUrl}}/products
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.token}}
+
+{
+  "name": "Smartphone X Copy",
+  "slug": "smartphone-x",
+  "price": 10,
+  "stock": 1,
+  "categoryIds": ["{{createCategory.response.body.data.id}}"]
+}
+
+### Create product with bad rating/price (error case: 400 zod)
+POST {{baseUrl}}/products
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.token}}
+
+{
+  "name": "Broken",
+  "price": -5,
+  "stock": -1,
+  "categoryIds": []
+}
+
+### Create product without auth (error case: 401)
+POST {{baseUrl}}/products
+Content-Type: application/json
+
+{
+  "name": "No Auth Product",
+  "price": 1,
+  "stock": 1,
+  "categoryIds": ["{{createCategory.response.body.data.id}}"]
+}
+
+### Get product by id (includes categories + reviews)
+GET {{baseUrl}}/products/{{createProduct.response.body.data.id}}
+
+### Update product (auth)
+PATCH {{baseUrl}}/products/{{createProduct.response.body.data.id}}
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.token}}
+
+{
+  "price": 649.99,
+  "stock": 40
+}
+
+### Soft delete product (auth)
+DELETE {{baseUrl}}/products/{{createProduct.response.body.data.id}}
+Authorization: Bearer {{login.response.body.token}}
+
+### ============================================================
+### REVIEW — create/get/update/delete (owner or admin)
+### ============================================================
+
+### List reviews for a product (public, requires productId)
+GET {{baseUrl}}/reviews?productId={{createProduct.response.body.data.id}}&page=1&limit=10
+
+### List reviews without productId (error case: 400)
+GET {{baseUrl}}/reviews
+
+### Create review (auth) -> capture id as REV_ID
+# 201
+# @name createReview
+POST {{baseUrl}}/reviews
+Content-Type: application/json
+Authorization: Bearer {{loginUser.response.body.token}}
+
+{
+  "productId": "{{createProduct.response.body.data.id}}",
+  "rating": 5,
+  "comment": "Excellent phone!"
+}
+
+### Create duplicate review (error case: 409 - one per user/product)
+POST {{baseUrl}}/reviews
+Content-Type: application/json
+Authorization: Bearer {{loginUser.response.body.token}}
+
+{
+  "productId": "{{createProduct.response.body.data.id}}",
+  "rating": 4
+}
+
+### Create review with invalid rating (error case: 400 zod)
+POST {{baseUrl}}/reviews
+Content-Type: application/json
+Authorization: Bearer {{loginUser.response.body.token}}
+
+{
+  "productId": "{{createProduct.response.body.data.id}}",
+  "rating": 9
+}
+
+### Create review without auth (error case: 401)
+POST {{baseUrl}}/reviews
+Content-Type: application/json
+
+{
+  "productId": "{{createProduct.response.body.data.id}}",
+  "rating": 5
+}
+
+### Get review by id
+GET {{baseUrl}}/reviews/{{createReview.response.body.data.id}}
+
+### Update own review (owner = normal user)
+PATCH {{baseUrl}}/reviews/{{createReview.response.body.data.id}}
+Content-Type: application/json
+Authorization: Bearer {{loginUser.response.body.token}}
+
+{
+  "rating": 4,
+  "comment": "Updated opinion"
+}
+
+### Update someone else's review (error case: 403, admin can; user cannot)
+### (run as a DIFFERENT non-admin user to get 403; here shown as the same normal user = 200)
+PATCH {{baseUrl}}/reviews/{{createReview.response.body.data.id}}
+Content-Type: application/json
+Authorization: Bearer {{loginUser.response.body.token}}
+
+{
+  "comment": "Edited again"
+}
+
+### Delete review (owner or admin)
+DELETE {{baseUrl}}/reviews/{{createReview.response.body.data.id}}
+Authorization: Bearer {{loginUser.response.body.token}}
+
+### ============================================================
+### ORDER — transactional create / list / status / cancel
+### ============================================================
+
+### Create order (auth) -> capture id as ORD_ID
+# 201 (total computed from product price * qty)
+# @name createOrder
+POST {{baseUrl}}/orders
+Content-Type: application/json
+Authorization: Bearer {{loginUser.response.body.token}}
+
+{
+  "items": [
+    { "productId": "{{createProduct.response.body.data.id}}", "quantity": 2 }
+  ]
+}
+
+### Create order with unknown product (error case: 400)
+POST {{baseUrl}}/orders
+Content-Type: application/json
+Authorization: Bearer {{loginUser.response.body.token}}
+
+{
+  "items": [ { "productId": "doesnotexist", "quantity": 1 } ]
+}
+
+### Create order without auth (error case: 401)
+POST {{baseUrl}}/orders
+Content-Type: application/json
+
+{
+  "items": [ { "productId": "{{createProduct.response.body.data.id}}", "quantity": 1 } ]
+}
+
+### List my orders (auth, normal user sees only own)
+GET {{baseUrl}}/orders?page=1&limit=10
+
+### List all orders as admin (admin sees all)
+GET {{baseUrl}}/orders
+Authorization: Bearer {{login.response.body.token}}
+
+### Get order by id (owner/admin)
+GET {{baseUrl}}/orders/{{createOrder.response.body.data.id}}
+Authorization: Bearer {{loginUser.response.body.token}}
+
+### Update order status (ADMIN only) -> 403 if non-admin
+PATCH {{baseUrl}}/orders/{{createOrder.response.body.data.id}}/status
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.token}}
+
+{
+  "status": "CONFIRMED"
+}
+
+### Update order status as non-admin (error case: 403)
+PATCH {{baseUrl}}/orders/{{createOrder.response.body.data.id}}/status
+Content-Type: application/json
+Authorization: Bearer {{loginUser.response.body.token}}
+
+{
+  "status": "CONFIRMED"
+}
+
+### Cancel order (owner or admin) -> soft delete + CANCELLED
+DELETE {{baseUrl}}/orders/{{createOrder.response.body.data.id}}
+Authorization: Bearer {{loginUser.response.body.token}}
+
+### ============================================================
+### USER — admin CRUD (admin only for list/write/delete)
+### ============================================================
+
+### List users (ADMIN only)
+GET {{baseUrl}}/users?page=1&limit=10
+Authorization: Bearer {{login.response.body.token}}
+
+### List users as non-admin (error case: 403)
+GET {{baseUrl}}/users
+Authorization: Bearer {{loginUser.response.body.token}}
+
+### Get user by id
+GET {{baseUrl}}/users/{{loginUser.response.body.data.id}}
+
+### Get non-existent user (error case: 404)
+GET {{baseUrl}}/users/usr_nonexistent000000000000
+
+### Update user (ADMIN)
+PATCH {{baseUrl}}/users/{{loginUser.response.body.data.id}}
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.token}}
+
+{
+  "name": "Renamed User",
+  "role": "MODERATOR"
+}
+
+### Update user with invalid role (error case: 400 zod)
+PATCH {{baseUrl}}/users/{{loginUser.response.body.data.id}}
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.token}}
+
+{
+  "role": "SUPERUSER"
+}
+
+### Soft delete user (ADMIN)
+DELETE {{baseUrl}}/users/{{loginUser.response.body.data.id}}
+Authorization: Bearer {{login.response.body.token}}
+
+### ============================================================
+### GENERIC ERROR CASES
+### ============================================================
+
+### Unknown route (error case: 404)
+GET {{baseUrl}}/nonexistent
+
+### No token on a protected route (error case: 401)
+GET {{baseUrl}}/orders
+
+### Malformed JSON body (error case: 400)
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{ "email": "x" }
