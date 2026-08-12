@@ -10,6 +10,10 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+app.get("/", (_req, res) => {
+  res.json({ success: true, message: "API is running", uptime: process.uptime() });
+});
+
 app.use("/api", routes);
 
 app.use((req, res) => {
