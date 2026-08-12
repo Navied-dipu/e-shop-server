@@ -122,7 +122,10 @@ export async function deleteCategory(id: string) {
   }
 
   await softDelete("category", id, "Category");
-  return getCategoryById(id);
+  return prisma.category.findFirst({
+    where: { id },
+    select: CATEGORY_SELECT,
+  });
 }
 
 function slugify(value: string): string {

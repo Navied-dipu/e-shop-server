@@ -62,5 +62,8 @@ export async function updateUser(id: string, input: UpdateUserInput) {
 
 export async function deleteUser(id: string) {
   await softDelete("user", id, "User");
-  return getUserById(id);
+  return prisma.user.findFirst({
+    where: { id },
+    select: USER_SELECT,
+  });
 }

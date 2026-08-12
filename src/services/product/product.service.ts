@@ -164,5 +164,8 @@ export async function updateProduct(id: string, input: UpdateProductInput) {
 export async function deleteProduct(id: string) {
   await assertActive("product", id, "Product");
   await softDelete("product", id, "Product");
-  return getProductById(id);
+  return prisma.product.findFirst({
+    where: { id },
+    select: PRODUCT_SELECT,
+  });
 }
